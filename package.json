@@ -1,16 +1,97 @@
-{
-  "name": "-codex-prompt",
-  "version": "1.0.0",
-  "description": "",
-  "main": "handler.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "dependencies": {
-    "axios": "^1.9.0"
+// handler.js
+const axios = require('axios');
+
+const menu = [
+  { category: "Appetizer", name: "Bruschetta", price: 8, allergens: ["gluten"] },
+  { category: "Appetizer", name: "Stuffed Mushrooms", price: 9, allergens: ["dairy"] },
+  { category: "Main",     name: "Garlic Butter Shrimp", price: 18, allergens: ["shellfish"] },
+  { category: "Dessert",  name: "No-Bake Oreo Cheesecake", price: 7, allergens: ["dairy","gluten"] }
+];
+
+exports.handler = async (event) => {
+  try {
+    const { message = "" } = JSON.parse(event.body || "{}");
+    const text = message.trim();
+    const lower = text.toLowerCase();
+    let reply;
+
+    // 1) Reservation intent
+    if (/reserve|book|table/.test(lower)) {
+      // simple slot extraction
+      const partyMatch = text.match(/for\s+(\d+)/i);
+      const dateMatch  = text.match(/on\s+([A-Za-z0-9,\s]+)/i);
+      const timeMatch  = text.match(/at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
+
+      const partySize = partyMatch ? parseInt(partyMatch[1],10) : 1;
+      const date      = dateMatch  ? dateMatch[1].trim()   : "";
+      const time      = timeMatch  ? timeMatch[1].trim()   : "";
+
+      try {
+        const res = await axios.post(
+          "https://api.opentable.com/v1/reservations",
+          { date, time, party_size: partySize },
+          { headers: { Authorization: `Bearer ${process.env.OPENTABLE_API_KEY}` } }
+        );
+
+        if (res.status >= 200 && res.status < 300) {
+          reply = `✅ Your table for ${partySize} on ${date} at ${time} is booked!`;
+        } else {
+          reply = `⚠️ Hmm, I couldn’t book that. Please try another time or date.`;
+        }
+      } catch (err) {
+        console.error("Reservation error:", err.response?.data || err);
+        reply = `❌ Booking failed: ${err.response?.data?.message || "please try again later."}`;
+      }
+
+    // 2) Menu lookup intent
+    } else if (/menu|appetizer|vegan|under|price/.test(lower)) {
+      // price filter
+      const under = lower.match(/under\s*\$?(\d+)/);
+      const maxPrice = under ? parseInt(under[1],10) : Infinity;
+      // category filter
+      const cats = ["appetizer","main","dessert"];
+      const cat  = cats.find(c=> lower.includes(c)) || null;
+      // allergen exclusion
+      const allergens = ["gluten","dairy","shellfish","nut"].filter(a=> lower.includes(a));
+      
+      let items = menu.filter(i=> i.price <= maxPrice);
+      if (cat) items = items.filter(i=> i.category.toLowerCase()===cat);
+      if (allergens.length) {
+        items = items.filter(i=> !i.allergens.some(a=> allergens.includes(a)));
+      }
+
+      if (items.length) {
+        reply = "🍽️ We have: " +
+          items.map(i=> `${i.name} ($${i.price})`).join(", ") +
+          ".";
+      } else {
+        reply = "😕 Sorry, no menu items match that.";
+      }
+
+    // 3) Specials intent
+    } else if (/special|today|deal/.test(lower)) {
+      reply = "🔥 Today's specials:\n" +
+              "1) Lobster Ravioli – $20\n" +
+              "2) Grilled Salmon – $25\n" +
+              "3) Chocolate Lava Cake – $8";
+
+    // 4) Fallback
+    } else {
+      reply = "❓ I can help you book a table or answer menu questions.  \n" +
+              "• “Book a table for 2 on June 12 at 7pm”  \n" +
+              "• “What appetizers under $10 do you have?”";
+    }
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ reply })
+    };
+
+  } catch (err) {
+    console.error("Handler failure:", err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ reply: "⚠️ Sorry, something went wrong." })
+    };
   }
-}
+};
