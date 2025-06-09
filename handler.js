@@ -1,3 +1,4 @@
+// handler.js
 const axios = require('axios');
 
 const menu = [
@@ -8,73 +9,85 @@ const menu = [
 ];
 
 exports.handler = async (event) => {
-  let message = "";
   try {
-    const body = JSON.parse(event.body || '{}');
-    message = body.message || '';
-  } catch (err) {
+    const { message = "" } = JSON.parse(event.body || "{}");
+    const text  = message.trim();
+    const lower = text.toLowerCase();
+    let reply;
+
+    // 1) Reservation intent
+    if (/reserve|book|table/.test(lower)) {
+      const partyMatch = text.match(/for\s+(\d+)/i);
+      const dateMatch  = text.match(/on\s+([A-Za-z0-9,\s]+)/i);
+      const timeMatch  = text.match(/at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
+
+      const partySize = partyMatch ? parseInt(partyMatch[1], 10) : 1;
+      const date      = dateMatch  ? dateMatch[1].trim()     : "";
+      const time      = timeMatch  ? timeMatch[1].trim()     : "";
+
+      try {
+        const res = await axios.post(
+          "https://api.opentable.com/v1/reservations",
+          { date, time, party_size: partySize },
+          { headers: { Authorization: `Bearer ${process.env.OPENTABLE_API_KEY}` } }
+        );
+
+        if (res.status >= 200 && res.status < 300) {
+          reply = `✅ Your table for ${partySize} on ${date} at ${time} is booked!`;
+        } else {
+          reply = `⚠️ Couldn’t book that—please try another time or date.`;
+        }
+      } catch (err) {
+        console.error("Reservation error:", err.response?.data || err);
+        const errMsg = err.response?.data?.message || "please try again later.";
+        reply = `❌ Booking failed: ${errMsg}`;
+      }
+
+    // 2) Menu lookup intent
+    } else if (/menu|appetizer|vegan|under|price/.test(lower)) {
+      const underMatch = lower.match(/under\s*\$?(\d+)/);
+      const maxPrice   = underMatch ? parseInt(underMatch[1], 10) : Infinity;
+      const cats       = ["appetizer", "main", "dessert"];
+      const cat        = cats.find(c => lower.includes(c)) || null;
+      const allergens  = ["gluten","dairy","shellfish","nut"]
+                         .filter(a => lower.includes(a));
+
+      let items = menu.filter(i => i.price <= maxPrice);
+      if (cat)       items = items.filter(i => i.category.toLowerCase() === cat);
+      if (allergens.length) {
+        items = items.filter(i =>
+          !i.allergens.some(a => allergens.includes(a))
+        );
+      }
+
+      reply = items.length
+        ? "🍽️ We have: " + items.map(i => `${i.name} ($${i.price})`).join(", ") + "."
+        : "😕 Sorry, no menu items match that.";
+
+    // 3) Specials intent
+    } else if (/special|today|deal/.test(lower)) {
+      reply = "🔥 Today's specials:\n" +
+              "1) Lobster Ravioli – $20\n" +
+              "2) Grilled Salmon – $25\n" +
+              "3) Chocolate Lava Cake – $8";
+
+    // 4) Fallback
+    } else {
+      reply = "❓ I can help with reservations or menu questions:\n" +
+              "• “Book a table for 2 on June 12 at 7pm”\n" +
+              "• “What appetizers under $10 do you have?”";
+    }
+
     return {
-      statusCode: 400,
-      body: JSON.stringify({ reply: 'Invalid request body' })
+      statusCode: 200,
+      body: JSON.stringify({ reply })
+    };
+
+  } catch (err) {
+    console.error("Handler failure:", err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ reply: "⚠️ Sorry, something went wrong." })
     };
   }
-
-  const text = message.toLowerCase();
-  let intent = 'none';
-  if (/\b(reserve|book|table)\b/.test(text)) {
-    intent = 'reservation';
-  } else if (/\b(menu|appetizer|vegan|under|price)\b/.test(text)) {
-    intent = 'menu_query';
-  } else if (/\b(special|today'?s|deal)\b/.test(text)) {
-    intent = 'specials';
-  }
-
-  let reply = '';
-
-  if (intent === 'reservation') {
-    const dateMatch = text.match(/on ([a-zA-Z0-9\s]+?) at/);
-    const timeMatch = text.match(/at ([0-9]{1,2}(:[0-9]{2})?\s?(am|pm))/);
-    const sizeMatch = text.match(/for (\d+)/);
-    const date = dateMatch ? dateMatch[1] : '';
-    const time = timeMatch ? timeMatch[1] : '';
-    const partySize = sizeMatch ? parseInt(sizeMatch[1], 10) : null;
-    try {
-      await axios.post(
-        'https://api.opentable.com/v1/reservations',
-        { date, time, party_size: partySize },
-        { headers: { Authorization: `Bearer ${process.env.OPENTABLE_API_KEY}` } }
-      );
-      reply = `Your table for ${partySize} on ${date} at ${time} is booked!`;
-    } catch (err) {
-      console.error(err);
-      reply = 'Sorry, we could not complete your reservation at this time.';
-    }
-  } else if (intent === 'menu_query') {
-    const priceMatch = text.match(/under\s*\$?(\d+)/);
-    const maxPrice = priceMatch ? Number(priceMatch[1]) : Infinity;
-    const categoryMatch = text.match(/\b(appetizer|main|dessert)\b/);
-    const category = categoryMatch ?
-      categoryMatch[1].charAt(0).toUpperCase() + categoryMatch[1].slice(1) : null;
-    const allergens = /vegan/.test(text) ? ['dairy', 'gluten', 'shellfish'] : [];
-
-    const filtered = menu.filter(item =>
-      (category ? item.category === category : true) &&
-      item.price <= maxPrice &&
-      !allergens.some(a => item.allergens.includes(a))
-    );
-    if (filtered.length) {
-      reply = 'We have ' + filtered.map(i => `${i.name} ($${i.price})`).join(', ') + '.';
-    } else {
-      reply = 'No matching menu items found.';
-    }
-  } else if (intent === 'specials') {
-    reply = "Today’s specials: ...";
-  } else {
-    reply = 'I can help you book a table or answer menu questions. How can I assist?';
-  }
-
-  return {
-    statusCode: 200,
-    body: JSON.stringify({ reply })
-  };
 };
